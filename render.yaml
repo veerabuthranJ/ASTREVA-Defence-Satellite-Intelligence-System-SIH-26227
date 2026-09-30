@@ -3,7 +3,7 @@ services:
     name: astreva-backend
     env: python
     region: oregon
-    plan: standard
+    plan: free
     buildCommand: "curl -fsSL https://github.com/git-lfs/git-lfs/releases/download/v3.8.0/git-lfs-linux-amd64-v3.8.0.tar.gz -o /tmp/git-lfs.tar.gz && tar -xzf /tmp/git-lfs.tar.gz -C /tmp && export PATH=\"/tmp/git-lfs-3.8.0:$PATH\" && git lfs install --force --skip-smudge && pip install --upgrade pip && pip install -r backend/requirements.txt && mkdir -p \"SIH-2PGITB&U2\" && GIT_LFS_SKIP_SMUDGE=1 git clone --depth 1 --single-branch https://github.com/MR-ROGUE01/SIH-2026.git \"SIH-2PGITB&U2/SIH-2026\" && git -C \"SIH-2PGITB&U2/SIH-2026\" lfs pull"
     startCommand: "uvicorn backend.main:app --host 0.0.0.0 --port $PORT"
     healthCheckPath: /api/health
