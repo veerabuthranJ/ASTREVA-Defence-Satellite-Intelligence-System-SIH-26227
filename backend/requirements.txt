@@ -3,8 +3,9 @@ uvicorn>=0.37.0
 numpy>=1.25.0
 pandas>=2.0.0
 pillow>=10.0.0
-torch>=2.0.0
-torchvision>=0.18.0
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.5.1+cpu
+torchvision==0.20.1+cpu
 open-clip-torch>=2.20.0
 faiss-cpu>=1.7.4
 rasterio>=1.4.0
