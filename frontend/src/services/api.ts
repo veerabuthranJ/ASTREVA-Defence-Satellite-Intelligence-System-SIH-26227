@@ -1,6 +1,24 @@
 import { AOI, ChangeCandidate, SceneRecord, ExportPackage, AuditLog } from '../types/geoint';
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/+$/, '');
+
+function resolveMediaUrls<T>(value: T): T {
+  if (typeof value === 'string' && (value.startsWith('/api/') || value.startsWith('/static/'))) {
+    return `${API_BASE_URL}${value}` as T;
+  }
+
+  if (Array.isArray(value)) {
+    return value.map(resolveMediaUrls) as T;
+  }
+
+  if (value !== null && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, nestedValue]) => [key, resolveMediaUrls(nestedValue)])
+    ) as T;
+  }
+
+  return value;
+}
 
 async function fetchJson<T>(endpoint: string, options?: RequestInit): Promise<T> {
   const url = `${API_BASE_URL}${endpoint}`;
@@ -17,7 +35,7 @@ async function fetchJson<T>(endpoint: string, options?: RequestInit): Promise<T>
     throw new Error(`API error ${response.status}: ${errorText}`);
   }
 
-  return response.json();
+  return resolveMediaUrls(await response.json());
 }
 
 export const apiService = {

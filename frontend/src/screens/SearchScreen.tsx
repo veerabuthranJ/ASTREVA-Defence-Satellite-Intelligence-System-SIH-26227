@@ -38,18 +38,23 @@ export const SearchScreen: React.FC = () => {
   } = useGeointStore();
 
   const [query, setQuery] = useState('');
+  const [dateFrom, setDateFrom] = useState('');
+  const [dateTo, setDateTo] = useState('');
+  const [minConfidence, setMinConfidence] = useState('0');
   const [selectedSensor, setSelectedSensor] = useState<string>('ALL');
   const [selectedChangeType, setSelectedChangeType] = useState<string>('ALL');
   const [selectedAoi, setSelectedAoi] = useState<string>('ALL');
   const [searchMode, setSearchMode] = useState<'text' | 'image'>('text');
   const [selectedImagePatch, setSelectedImagePatch] = useState<string>('construction');
   const [isSearching, setIsSearching] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
   const [lastSearchedQuery, setLastSearchedQuery] = useState('');
   const [vectorSearchResults, setVectorSearchResults] = useState<any[] | null>(null);
 
-  const executeSearch = async (searchStr: string) => {
+  const executeSearch = async (searchStr: string, imagePatch = selectedImagePatch) => {
     if (!searchStr && searchMode === 'text') return;
     setIsSearching(true);
+    setSearchError(null);
     setVectorSearchResults([]); // Clear previous results immediately
     setLastSearchedQuery(searchStr);
     addSearchHistory(searchStr || (searchMode === 'image' ? `Patch: ${selectedImagePatch}` : 'Archive Search'));
@@ -57,14 +62,19 @@ export const SearchScreen: React.FC = () => {
 
     try {
       let patchTile = 'ranchi_2021_06_tile_0_0.tif';
-      if (selectedImagePatch === 'road') patchTile = 'ranchi_2021_06_tile_0_4.tif';
-      else if (selectedImagePatch === 'river') patchTile = 'ranchi_2021_06_tile_1_5.tif';
-      else if (selectedImagePatch === 'clearing') patchTile = 'ranchi_2021_06_tile_4_2.tif';
+      if (imagePatch === 'road') patchTile = 'ranchi_2021_06_tile_0_4.tif';
+      else if (imagePatch === 'river') patchTile = 'ranchi_2021_06_tile_1_5.tif';
+      else if (imagePatch === 'clearing') patchTile = 'ranchi_2021_06_tile_4_2.tif';
 
       const res = await apiService.searchTiles({
         query: searchMode === 'text' ? (searchStr || undefined) : undefined,
         image_tile: searchMode === 'image' ? patchTile : undefined,
         top_k: 12,
+        date_from: dateFrom || undefined,
+        date_to: dateTo || undefined,
+        min_confidence: Number(minConfidence) || undefined,
+        aoi_id: selectedAoi !== 'ALL' ? selectedAoi : undefined,
+        sensor: selectedSensor !== 'ALL' ? selectedSensor : undefined,
         change_type: selectedChangeType !== 'ALL' ? selectedChangeType : undefined,
       });
 
@@ -77,6 +87,7 @@ export const SearchScreen: React.FC = () => {
       setVectorSearchResults(finalResults);
     } catch (err) {
       console.warn('Vector search error:', err);
+      setSearchError(err instanceof Error ? err.message : 'The satellite search could not be completed.');
       setVectorSearchResults([]);
     } finally {
       setIsSearching(false);
@@ -92,10 +103,14 @@ export const SearchScreen: React.FC = () => {
   const handleClearSearch = () => {
     setQuery('');
     setLastSearchedQuery('');
+    setSearchError(null);
     setVectorSearchResults(null);
     setSelectedAoi('ALL');
     setSelectedChangeType('ALL');
     setSelectedSensor('ALL');
+    setDateFrom('');
+    setDateTo('');
+    setMinConfidence('0');
   };
 
   return (
@@ -206,7 +221,7 @@ export const SearchScreen: React.FC = () => {
                   key={patch.id}
                   onClick={() => {
                     setSelectedImagePatch(patch.id);
-                    executeSearch(patch.label);
+                    executeSearch(patch.label, patch.id);
                   }}
                   className={`p-2.5 rounded-lg border text-left transition-all ${
                     selectedImagePatch === patch.id
@@ -223,7 +238,7 @@ export const SearchScreen: React.FC = () => {
         )}
 
         {/* Filter Controls Row */}
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-3 border-t border-slate-800/80 text-xs">
+        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3 pt-3 border-t border-slate-800/80 text-xs">
           {/* AOI Filter */}
           <div>
             <label className="text-[10px] font-mono text-slate-400 block mb-1">SURVEILLANCE SECTOR</label>
@@ -250,11 +265,58 @@ export const SearchScreen: React.FC = () => {
               className="w-full bg-[#070B14] border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-[#7E9F71]"
             >
               <option value="ALL">All Change Types</option>
-              <option value="Construction">Construction</option>
-              <option value="Road Development">Road Development</option>
-              <option value="Land Clearing">Land Clearing</option>
-              <option value="Water Change">Water Change</option>
-              <option value="Agriculture Change">Agriculture Change</option>
+              <option value="construction">Construction</option>
+              <option value="road_development">Road Development</option>
+              <option value="clearance">Land Clearing</option>
+              <option value="general_change">General Change</option>
+            </select>
+          </div>
+
+          <div>
+            <label className="text-[10px] font-mono text-slate-400 block mb-1">SENSOR</label>
+            <select
+              value={selectedSensor}
+              onChange={(e) => setSelectedSensor(e.target.value)}
+              className="w-full bg-[#070B14] border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-[#7E9F71]"
+            >
+              <option value="ALL">All Sensors</option>
+              <option value="Sentinel-2 L2A">Sentinel-2 L2A</option>
+            </select>
+          </div>
+
+          <div>
+            <label className="text-[10px] font-mono text-slate-400 block mb-1">ACQUIRED FROM</label>
+            <input
+              type="date"
+              value={dateFrom}
+              max={dateTo || undefined}
+              onChange={(e) => setDateFrom(e.target.value)}
+              className="w-full bg-[#070B14] border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-[#7E9F71]"
+            />
+          </div>
+
+          <div>
+            <label className="text-[10px] font-mono text-slate-400 block mb-1">ACQUIRED TO</label>
+            <input
+              type="date"
+              value={dateTo}
+              min={dateFrom || undefined}
+              onChange={(e) => setDateTo(e.target.value)}
+              className="w-full bg-[#070B14] border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-[#7E9F71]"
+            />
+          </div>
+
+          <div>
+            <label className="text-[10px] font-mono text-slate-400 block mb-1">MINIMUM SIMILARITY</label>
+            <select
+              value={minConfidence}
+              onChange={(e) => setMinConfidence(e.target.value)}
+              className="w-full bg-[#070B14] border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-[#7E9F71]"
+            >
+              <option value="0">Any score</option>
+              <option value="0.22">22% or higher</option>
+              <option value="0.35">35% or higher</option>
+              <option value="0.5">50% or higher</option>
             </select>
           </div>
 
@@ -272,7 +334,7 @@ export const SearchScreen: React.FC = () => {
       </div>
 
       {/* Results Header / Telemetry Readout */}
-      {vectorSearchResults !== null && (
+      {vectorSearchResults !== null && !searchError && (
         <div className="flex items-center justify-between text-xs font-mono text-slate-400 px-1">
           <div className="flex items-center space-x-2">
             <span>VECTOR HITS FOUND:</span>
@@ -293,7 +355,12 @@ export const SearchScreen: React.FC = () => {
       )}
 
       {/* Results Rendering */}
-      {isSearching ? (
+      {searchError ? (
+        <div role="alert" className="p-8 text-center rounded-xl bg-red-950/30 border border-red-900/70 space-y-3">
+          <div className="text-sm font-bold text-red-200">Satellite search unavailable</div>
+          <p className="text-xs text-red-100/70 max-w-xl mx-auto">{searchError}</p>
+        </div>
+      ) : isSearching ? (
         <div className="p-12 text-center rounded-xl bg-[#0B1120]/60 border border-slate-800 space-y-3">
           <RefreshCw className="w-8 h-8 text-[#A3BF99] mx-auto animate-spin" />
           <div className="text-sm font-bold text-slate-200">Executing OpenCLIP Semantic Inference...</div>

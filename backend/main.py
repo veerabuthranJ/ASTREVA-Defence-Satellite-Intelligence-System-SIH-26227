@@ -42,6 +42,7 @@ except Exception:
 
 # Import SIH-2026 functions if available
 HAS_SIH_ML = False
+SIH_ML_IMPORT_ERROR: Optional[str] = None
 try:
     import torch
     import open_clip
@@ -56,6 +57,7 @@ try:
     HAS_SIH_ML = True
     print("Successfully loaded SIH-2026 ML & Geospatial modules!")
 except Exception as e:
+    SIH_ML_IMPORT_ERROR = f"{type(e).__name__}: {e}"
     print(f"Warning: Could not load full SIH-2026 ML dependencies directly: {e}")
 
 # ─── FASTAPI APP INITIALIZATION ───────────────────────────────────────────────
@@ -86,8 +88,8 @@ if os.path.exists(SIH_TILES_DIR):
 class SearchRequest(BaseModel):
     query: Optional[str] = None
     image_tile: Optional[str] = None
-    top_k: int = 10
-    min_confidence: float = 0.0
+    top_k: int = Field(default=10, ge=1, le=180)
+    min_confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     date_from: Optional[str] = None
     date_to: Optional[str] = None
     aoi_id: Optional[str] = None
@@ -116,6 +118,7 @@ class ExportCreateRequest(BaseModel):
 DECISIONS_FILE = os.path.join(SIH_DATASET_DIR, "analyst_decisions.json")
 REVIEW_QUEUE_FILE = os.path.join(SIH_INDEX_DIR, "review_queue.json")
 AUDITED_CANDIDATES_FILE = os.path.join(SIH_INDEX_DIR, "change_candidates_audited.json")
+CHANGE_CANDIDATES_FILE = os.path.join(SIH_INDEX_DIR, "change_candidates.json")
 CATALOGUE_FILE = os.path.join(SIH_DATASET_DIR, "tile_catalogue.csv")
 CLUSTERS_FILE = os.path.join(SIH_INDEX_DIR, "tile_clusters.json")
 
@@ -269,9 +272,10 @@ def get_health():
         ntotal = semantic_search.index.ntotal
 
     return {
-        "status": "OPERATIONAL",
+        "status": "OPERATIONAL" if HAS_SIH_ML and ntotal > 0 else "DEGRADED",
         "enclave": "AIR-GAPPED DEFENCE SYSTEM (100% LOCAL)",
         "sih_ml_active": HAS_SIH_ML,
+        "sih_ml_error": SIH_ML_IMPORT_ERROR,
         "clip_model": "OpenCLIP ViT-B/32 (laion2b_s34b_b79k)",
         "faiss_index_tiles": ntotal,
         "mean_latency_ms": 88.28,
@@ -279,9 +283,9 @@ def get_health():
         "components": [
             {"component": "FAISS Vector Index (tiles.faiss)", "status": "OPERATIONAL" if faiss_loaded else "STANDBY", "latencyMs": 12, "memoryUsage": "4.2 MB", "version": "1.15.0", "details": f"{ntotal} tile vectors indexed", "lastTested": "Active"},
             {"component": "OpenCLIP ViT-B/32 Inference Engine", "status": "OPERATIONAL" if HAS_SIH_ML else "STANDBY", "latencyMs": 76, "memoryUsage": "340 MB", "version": "3.3.0", "details": "Zero-shot visual/text embedding generator", "lastTested": "Active"},
-            {"component": "Multi-Temporal Change Detector", "status": "OPERATIONAL", "latencyMs": 18, "memoryUsage": "18 MB", "version": "1.0.0", "details": "Same-season spectral delta & morphological box tagger", "lastTested": "Active"},
-            {"component": "False-Alarm Confounder Suppressor", "status": "OPERATIONAL", "latencyMs": 8, "memoryUsage": "2 MB", "version": "1.0.0", "details": "Seasonal penalty & nodata quality factor calibration", "lastTested": "Active"},
-            {"component": "Unsupervised KMeans Terrain Clusterer", "status": "OPERATIONAL", "latencyMs": 14, "memoryUsage": "6 MB", "version": "1.0.0", "details": "8-cluster semantic landscape partitioning", "lastTested": "Active"}
+            {"component": "Multi-Temporal Change Detector", "status": "OPERATIONAL" if HAS_SIH_ML else "STANDBY", "latencyMs": 18, "memoryUsage": "18 MB", "version": "1.0.0", "details": "Same-season spectral delta & morphological box tagger", "lastTested": "Active"},
+            {"component": "False-Alarm Confounder Suppressor", "status": "OPERATIONAL" if HAS_SIH_ML else "STANDBY", "latencyMs": 8, "memoryUsage": "2 MB", "version": "1.0.0", "details": "Seasonal penalty & nodata quality factor calibration", "lastTested": "Active"},
+            {"component": "Unsupervised KMeans Terrain Clusterer", "status": "OPERATIONAL" if HAS_SIH_ML else "STANDBY", "latencyMs": 14, "memoryUsage": "6 MB", "version": "1.0.0", "details": "8-cluster semantic landscape partitioning", "lastTested": "Active"}
         ]
     }
 
@@ -472,12 +476,16 @@ def search_tiles(payload: SearchRequest):
     Fulfills Phase 4 Semantic Search.
     """
     if not HAS_SIH_ML:
-        raise HTTPException(status_code=500, detail="SIH ML dependencies not initialized")
+        detail = "SIH ML dependencies not initialized"
+        if SIH_ML_IMPORT_ERROR:
+            detail = f"{detail}: {SIH_ML_IMPORT_ERROR}"
+        raise HTTPException(status_code=503, detail=detail)
         
     try:
-        if payload.query:
-            query_vec = semantic_search.embed_text(payload.query)
-            query_label = payload.query
+        query = payload.query.strip() if payload.query else ""
+        if query:
+            query_vec = semantic_search.embed_text(query)
+            query_label = query
         elif payload.image_tile:
             tile_path = os.path.join(SIH_TILES_DIR, os.path.basename(payload.image_tile))
             if not os.path.exists(tile_path):
@@ -487,14 +495,73 @@ def search_tiles(payload: SearchRequest):
         else:
             raise HTTPException(status_code=400, detail="Must provide either text query or image_tile")
 
-        pool_size = min(payload.top_k * 10, semantic_search.index.ntotal)
+        index_size = semantic_search.index.ntotal
+        if index_size < 1:
+            raise HTTPException(status_code=503, detail="The satellite tile index is empty")
+
+        has_filters = any((
+            payload.date_from,
+            payload.date_to,
+            payload.aoi_id and payload.aoi_id != "ALL",
+            payload.sensor and payload.sensor != "ALL",
+            payload.change_type and payload.change_type != "ALL",
+            payload.min_confidence > 0,
+        ))
+        pool_size = index_size if has_filters else min(payload.top_k * 10, index_size)
         raw_results = semantic_search.search(query_vec, top_k=pool_size)
+
+        aoi_bounds = {}
+        if payload.aoi_id and payload.aoi_id != "ALL":
+            aoi = next((item for item in get_aois() if item["id"] == payload.aoi_id), None)
+            if aoi is None:
+                raise HTTPException(status_code=422, detail=f"Unknown AOI: {payload.aoi_id}")
+            coordinates = aoi["polygonCoords"]
+            aoi_bounds = {
+                "lon_min": min(point[1] for point in coordinates),
+                "lat_min": min(point[0] for point in coordinates),
+                "lon_max": max(point[1] for point in coordinates),
+                "lat_max": max(point[0] for point in coordinates),
+            }
 
         filtered = semantic_search.apply_filters(
             raw_results,
             date_from=payload.date_from,
-            date_to=payload.date_to
+            date_to=payload.date_to,
+            **aoi_bounds,
         )
+
+        if payload.sensor and payload.sensor != "ALL":
+            filtered = [
+                (score, meta) for score, meta in filtered
+                if str(meta.get("sensor", "")).casefold() == payload.sensor.casefold()
+            ]
+
+        if payload.min_confidence > 0:
+            filtered = [
+                (score, meta) for score, meta in filtered
+                if score >= payload.min_confidence
+            ]
+
+        tile_change_types: Dict[str, set] = {}
+        change_candidates = load_json_file(CHANGE_CANDIDATES_FILE, [])
+        for candidate in change_candidates:
+            change_type = candidate.get("change_type")
+            if not change_type:
+                continue
+            for tile_key in ("before_tile", "after_tile"):
+                tile_file = candidate.get(tile_key)
+                if tile_file:
+                    tile_change_types.setdefault(tile_file, set()).add(change_type)
+
+        requested_change_type = payload.change_type
+        if requested_change_type and requested_change_type != "ALL":
+            requested_change_type = requested_change_type.strip().casefold().replace(" ", "_").replace("-", "_")
+            if requested_change_type in {"land_clearing", "clearing"}:
+                requested_change_type = "clearance"
+            filtered = [
+                (score, meta) for score, meta in filtered
+                if requested_change_type in tile_change_types.get(meta.get("tile_file", ""), set())
+            ]
         
         top_results = filtered[: payload.top_k]
         
@@ -514,6 +581,7 @@ def search_tiles(payload: SearchRequest):
                 "lon_min": meta["lon_min"],
                 "lon_max": meta["lon_max"],
                 "sensor": meta["sensor"],
+                "change_type": ", ".join(sorted(tile_change_types.get(tile_file, set()))),
                 "image_url": f"/api/tiles/{tile_file}/image"
             })
             
@@ -522,6 +590,8 @@ def search_tiles(payload: SearchRequest):
             "results_count": len(formatted_results),
             "results": formatted_results
         }
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"Error in vector search: {e}")
         raise HTTPException(status_code=500, detail=str(e))
